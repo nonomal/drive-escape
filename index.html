@@ -4,6 +4,21 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>周末自驾逃离计划</title>
+  <meta name="description" content="输入出发城市与周末可用时间，在地图上探索你能开到多远。" />
+  <link rel="canonical" href="https://drive-escape.pomodiary.com/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:title" content="周末自驾逃离计划" />
+  <meta property="og:description" content="输入出发城市与周末可用时间，在地图上探索你能开到多远。" />
+  <meta property="og:url" content="https://drive-escape.pomodiary.com/" />
+  <meta property="og:image" content="https://drive-escape.pomodiary.com/og-image-v2.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="周末自驾逃离计划：沿地图公路探索周末可到达的目的地" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="周末自驾逃离计划" />
+  <meta name="twitter:description" content="输入出发城市与周末可用时间，在地图上探索你能开到多远。" />
+  <meta name="twitter:image" content="https://drive-escape.pomodiary.com/og-image-v2.png" />
   <!-- Google tag (gtag.js) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-7R2BCNPBSP"></script>
   <script>
@@ -12,6 +27,11 @@
     gtag('js', new Date());
     gtag('config', 'G-7R2BCNPBSP');
   </script>
+  <script defer
+    src="https://vibeloft.ai/telemetry/v1.js"
+    data-vl-product-id="d4a73285-3bbf-4be7-b13d-a3b3420272ec"
+    data-vl-auth-key="vl_web.4dwDY1T5us8olEL_R8QUTKm4BHH7VwSyIY1CuF13Bpk"
+  ></script>
   <script src="lang/zh-CN.js?v=2" id="lang-script"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1153,7 +1173,9 @@ async function loadProvinceCities(provAdcode) {
 async function fetchOSRMBatch(originLng, originLat, destinations, signal) {
   // destinations: [{ adcode, lng, lat, name }]
   // 每批最多 50 个
+  // 返回 { ok, results }：ok=false 表示请求本身失败（网络/上游错误），结果不完整，调用方应保留估算值
   const results = {};
+  let ok = true;
   const batchSize = 50;
 
   for (let i = 0; i < destinations.length; i += batchSize) {
@@ -1173,6 +1195,7 @@ async function fetchOSRMBatch(originLng, originLat, destinations, signal) {
         }).join('|');
         const url = `/api/amap-driving?origin=${encodeURIComponent(origin)}&destinations=${encodeURIComponent(dests)}`;
         const res = await fetch(url, signal ? { signal } : {});
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         durations = data.durations || [];
         distances = data.distances || [];
@@ -1182,24 +1205,31 @@ async function fetchOSRMBatch(originLng, originLat, destinations, signal) {
         const destIndices = batch.map((_, j) => j + 1).join(";");
         const url = `/api/routing?coords=${encodeURIComponent(coords)}&sources=0&destinations=${encodeURIComponent(destIndices)}`;
         const res = await fetch(url, signal ? { signal } : {});
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         durations = data.durations?.[0] || [];
         distances = data.distances?.[0] || [];
       }
 
-      batch.forEach((d, j) => {
-        const timeSec = durations[j];
-        const distM = distances[j];
-        if (timeSec != null && timeSec > 0) {
-          results[d.adcode] = {
-            name: d.name,
-            time: Math.round(timeSec / 360) / 10,
-            dist: Math.round(distM / 1000)
-          };
-        }
-      });
+      if (durations.length !== batch.length) {
+        // 返回数量与请求数量不符：上游整体失败或结果错位，这批结果不可信
+        ok = false;
+      } else {
+        batch.forEach((d, j) => {
+          const timeSec = durations[j];
+          const distM = distances[j];
+          if (timeSec != null && timeSec > 0) {
+            results[d.adcode] = {
+              name: d.name,
+              time: Math.round(timeSec / 360) / 10,
+              dist: Math.round(distM / 1000)
+            };
+          }
+        });
+      }
     } catch(e) {
       if (e.name === 'AbortError') break;
+      ok = false;
     }
 
     // 批次间间隔
@@ -1207,7 +1237,7 @@ async function fetchOSRMBatch(originLng, originLat, destinations, signal) {
       await new Promise(r => setTimeout(r, 500));
     }
   }
-  return results;
+  return { ok, results };
 }
 
 // ── 渲染地图 ──
@@ -1642,6 +1672,17 @@ async function switchCity(name, lng, lat, countryCode) {
   let cached = null;
   try { cached = JSON.parse(localStorage.getItem(cacheKey)); } catch(e) {}
 
+  // 历史版本的 bug 会把"请求失败"当作不可达（time:999）写进缓存；
+  // 正常数据里不可达区县极少，占比过高说明缓存已被污染，丢弃并重新计算
+  if (cached && typeof cached === 'object') {
+    const entries = Object.values(cached);
+    const badCount = entries.filter(v => !v || typeof v.time !== 'number' || v.time >= 999).length;
+    if (entries.length && badCount > entries.length * 0.2) {
+      cached = null;
+      try { localStorage.removeItem(cacheKey); } catch(e) {}
+    }
+  }
+
   if (cached && typeof cached === 'object' && Object.keys(cached).length > 0) {
     // 有缓存：直接用缓存的 OSRM 数据
     for (const [code, data] of Object.entries(cached)) {
@@ -1681,26 +1722,31 @@ async function switchCity(name, lng, lat, countryCode) {
     for (let bi = 0; bi < batches.length; bi++) {
       if (signal.aborted) break;
       const batch = batches[bi];
-      const batchResults = await fetchOSRMBatch(lng, lat, batch, signal);
+      const { ok: batchOk, results: batchResults } = await fetchOSRMBatch(lng, lat, batch, signal);
       for (const [adcode, result] of Object.entries(batchResults)) {
         driveDataMap[adcode] = { ...driveDataMap[adcode], ...result, estimated: false };
         driveCache[adcode] = result;
       }
-      // 标记无结果的为不可达
-      batch.forEach(d => {
-        if (!batchResults[d.adcode]) {
-          driveDataMap[d.adcode] = { ...driveDataMap[d.adcode], time: 999, dist: 0, estimated: false };
-          driveCache[d.adcode] = { name: d.name, time: 999, dist: 0 };
-        }
-      });
+      // 仅在请求成功时把无结果的标记为不可达；
+      // 请求失败（网络/上游错误）时保留估算值，避免整批区县从地图上消失
+      if (batchOk) {
+        batch.forEach(d => {
+          if (!batchResults[d.adcode]) {
+            driveDataMap[d.adcode] = { ...driveDataMap[d.adcode], time: 999, dist: 0, estimated: false };
+            driveCache[d.adcode] = { name: d.name, time: 999, dist: 0 };
+          }
+        });
+      }
       if (signal.aborted) break;
       showLoading(t('loadingDriveTime', { done: String(bi + 1), total: String(batches.length) }));
       renderMap(true);
     }
     if (!signal.aborted) hideLoading();
 
-    // 保存到 localStorage
-    try { localStorage.setItem(cacheKey, JSON.stringify(driveCache)); } catch(e) {}
+    // 保存到 localStorage（全部失败时 driveCache 为空，不写入）
+    try {
+      if (Object.keys(driveCache).length) localStorage.setItem(cacheKey, JSON.stringify(driveCache));
+    } catch(e) {}
   }
 
   // 更新 URL
