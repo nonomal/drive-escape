@@ -32,7 +32,16 @@ export async function onRequest(context) {
   const osrmUrl = `https://router.project-osrm.org/table/v1/driving/${coords}?sources=${sources}&destinations=${destinations}&annotations=duration,distance`;
 
   try {
-    const r = await fetch(osrmUrl);
+    // OSRM (routing.openstreetmap.de) 要求请求带可标识身份的 User-Agent，缺失会被 403 拒绝
+    const r = await fetch(osrmUrl, {
+      headers: { 'User-Agent': 'DriveEscape/1.0 (contact@drive-escape.com)' }
+    });
+    if (!r.ok) {
+      return new Response(JSON.stringify({ error: `osrm upstream ${r.status}` }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      });
+    }
     const data = await r.json();
 
     if (data.code !== 'Ok') {

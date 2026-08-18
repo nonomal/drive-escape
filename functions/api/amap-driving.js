@@ -28,11 +28,20 @@ export async function onRequest(context) {
       });
     }
 
-    // 高德返回 results 数组，每项有 origin_id, dest_id, distance(米), duration(秒)
-    // 按 origin_id 排序保证顺序
-    const sorted = data.results.slice().sort((a, b) => Number(a.origin_id) - Number(b.origin_id));
-    const durations = sorted.map(r => Number(r.duration));
-    const distances = sorted.map(r => Number(r.distance));
+    // 高德返回 results 数组，每项有 origin_id(1-based), dest_id, distance(米), duration(秒)
+    // 注意：算路失败的点可能被略过或缺少字段，必须按 origin_id 对位回填，
+    // 否则数组错位会让后面所有点的结果串位
+    const originCount = destinations.split('|').length;
+    const durations = new Array(originCount).fill(null);
+    const distances = new Array(originCount).fill(null);
+    for (const item of data.results) {
+      const idx = Number(item.origin_id) - 1;
+      if (idx < 0 || idx >= originCount) continue;
+      const dur = Number(item.duration);
+      const dist = Number(item.distance);
+      durations[idx] = Number.isFinite(dur) && dur > 0 ? dur : null;
+      distances[idx] = Number.isFinite(dist) ? dist : null;
+    }
 
     return new Response(JSON.stringify({ durations, distances }), {
       headers: {
